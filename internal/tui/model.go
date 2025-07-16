@@ -17,6 +17,13 @@ type Model struct {
 	focusedButton int // 0: back, 1: next/submit
 	submitted     bool
 	quitting      bool
+
+	// Backup state
+	backupInProgress bool
+	backupFinished   bool
+	backupError      error
+	outputPath       string
+	backupMessage    string
 }
 
 // NewModel initializes the model with the required text inputs.
@@ -42,6 +49,7 @@ func NewModel() Model {
 		inputs[i].Prompt = prompts[i] + ": "
 		inputs[i].Placeholder = placeholders[i]
 		inputs[i].CharLimit = 256
+		inputs[i].Width = 50
 		inputs[i].PromptStyle = pinkTextPrompt
 		inputs[i].TextStyle = whiteText
 		if i == 2 { // Password
@@ -89,6 +97,41 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	}
 
+	// Handle backup messages
+	switch msg := msg.(type) {
+	case PgDumpStartedMsg:
+		m.backupInProgress = true
+		m.backupMessage = "Backup started..."
+		return m, nil
+	case PgDumpFinishedMsg:
+		m.backupInProgress = false
+		m.backupFinished = true
+		m.backupError = msg.Err
+		m.outputPath = msg.OutputPath
+		if msg.Err != nil {
+			m.backupMessage = fmt.Sprintf("Backup failed: %v", msg.Err)
+		} else {
+			m.backupMessage = "Backup completed successfully!"
+		}
+		m.quitting = true  // Set quitting to true to show final summary
+		return m, tea.Quit // Quit after showing the final message
+	case PgDumpProgressMsg:
+		m.backupMessage = string(msg)
+		return m, nil
+	}
+
+	if m.backupInProgress || m.backupFinished {
+		// If backup is running or finished, only allow quitting
+		if msg, ok := msg.(tea.KeyMsg); ok {
+			switch msg.Type {
+			case tea.KeyCtrlC, tea.KeyEsc:
+				m.quitting = true
+				return m, tea.Quit
+			}
+		}
+		return m, nil
+	}
+
 	currentInput := &m.inputs[m.step]
 
 	switch msg := msg.(type) {
@@ -117,11 +160,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case tea.KeyEnter:
 			if m.focusOnInput {
-				// If on the last step, submit the form
 				if m.step == len(m.inputs)-1 {
 					m.submitted = true
-					m.quitting = true
-					return m, tea.Quit
+					return m, RunPgDumpCmd(m)
 				}
 				m.nextStep()
 			} else {
@@ -131,8 +172,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				} else { // Next/Submit button
 					if m.step == len(m.inputs)-1 {
 						m.submitted = true
-						m.quitting = true
-						return m, tea.Quit
+						return m, RunPgDumpCmd(m)
 					}
 					m.nextStep()
 				}
@@ -157,23 +197,55 @@ func (m Model) View() string {
 	if m.quitting {
 		if m.submitted {
 			var b strings.Builder
-			b.WriteString(summaryStyle.Render("Backup configuration summary:"))
-			b.WriteString("\n\n")
-			for i := range m.inputs {
-				var value string
-				if i == 2 { // Password
-					value = strings.Repeat("•", len(m.inputs[i].Value()))
-				} else {
-					value = m.inputs[i].Value()
+			if m.backupError != nil {
+				b.WriteString(summaryStyle.Render("Backup Failed!"))
+				b.WriteString("\n\n")
+				b.WriteString(cancelledStyle.Render(m.backupMessage))
+			} else {
+				b.WriteString(summaryStyle.Render("Backup Successful!"))
+				b.WriteString("\n\n")
+				b.WriteString(greenTextPrompt.Render(m.backupMessage))
+				if m.outputPath != "" {
+					b.WriteString(fmt.Sprintf("\nBackup file: %s", greenTextValue.Render(m.outputPath)))
 				}
-				line := fmt.Sprintf("%s %s", greenTextPrompt.Render(m.inputs[i].Prompt), greenTextValue.Render(value))
-				b.WriteString(line)
-				b.WriteRune('\n')
 			}
-			b.WriteString("\n")
+			b.WriteString("\n\nPress any key to exit.")
 			return b.String()
 		}
 		return cancelledStyle.Render("Backup wizard cancelled.") + "\n"
+	}
+
+	if m.backupInProgress {
+		var b strings.Builder
+		b.WriteString(welcomeStyle.Render("Welcome to the PostgreSQL Backup Wizard!"))
+		b.WriteString("\n\n")
+		b.WriteString(lipgloss.JoinVertical(lipgloss.Left,
+			"Backup in progress...",
+			greyText.Render(m.backupMessage),
+		))
+		b.WriteString("\n\n")
+		b.WriteString(helpStyle.Render("ctrl+c: cancel"))
+		return b.String()
+	}
+
+	if m.submitted {
+		var b strings.Builder
+		b.WriteString(summaryStyle.Render("Backup configuration summary:"))
+		b.WriteString("\n\n")
+		for i := range m.inputs {
+			var value string
+			if i == 2 { // Password
+				value = strings.Repeat("•", len(m.inputs[i].Value()))
+			} else {
+				value = m.inputs[i].Value()
+			}
+			line := fmt.Sprintf("%s %s", greenTextPrompt.Render(m.inputs[i].Prompt), greenTextValue.Render(value))
+			b.WriteString(line)
+			b.WriteRune('\n')
+		}
+		b.WriteString("\n")
+		b.WriteString("Starting backup...")
+		return b.String()
 	}
 
 	var b strings.Builder
