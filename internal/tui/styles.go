@@ -6,6 +6,7 @@ var (
 	// Colors
 	pink  = lipgloss.Color("205")
 	green = lipgloss.Color("78")
+	red   = lipgloss.Color("196")
 	grey  = lipgloss.Color("240")
 	white = lipgloss.Color("255")
 	amber = lipgloss.Color("214")
@@ -18,6 +19,7 @@ var (
 	whiteText       = lipgloss.NewStyle().Foreground(white)
 	welcomeStyle    = lipgloss.NewStyle().Foreground(pink).Bold(true).Italic(true)
 	summaryStyle    = lipgloss.NewStyle().Foreground(green).Bold(true).Italic(true)
+	errorStyle      = lipgloss.NewStyle().Foreground(red).Bold(true).Italic(true)
 	cancelledStyle  = lipgloss.NewStyle().Foreground(amber).Bold(true).Italic(true)
 
 	// Button styles

@@ -9,8 +9,23 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+type viewState int
+
+const (
+	mainMenu viewState = iota
+	restoreChoiceMenu
+	backupForm
+	restoreForm
+)
+
 // Model defines the application's state.
 type Model struct {
+	// View management
+	currentView       viewState
+	mainMenuChoice    int // 0: backup, 1: restore
+	restoreMenuChoice int // 0: existing db, 1: new db
+
+	// Form state
 	inputs        []textinput.Model
 	step          int
 	focusOnInput  bool
@@ -24,10 +39,25 @@ type Model struct {
 	backupError      error
 	outputPath       string
 	backupMessage    string
+
+	// Restore state
+	restoreInProgress bool
+	restoreFinished   bool
+	restoreError      error
+	restoreMessage    string
+	restoreNewDB      bool
 }
 
 // NewModel initializes the model with the required text inputs.
 func NewModel() Model {
+	return Model{
+		currentView:    mainMenu,
+		mainMenuChoice: 0,
+		focusOnInput:   true,
+	}
+}
+
+func setupBackupInputs() []textinput.Model {
 	inputs := make([]textinput.Model, 5)
 	prompts := []string{
 		"Database Host",
@@ -57,15 +87,42 @@ func NewModel() Model {
 			inputs[i].EchoCharacter = '•'
 		}
 	}
-
 	inputs[0].Focus()
+	return inputs
+}
 
-	return Model{
-		inputs:        inputs,
-		step:          0,
-		focusOnInput:  true,
-		focusedButton: 0,
+func setupRestoreInputs() []textinput.Model {
+	inputs := make([]textinput.Model, 5)
+	prompts := []string{
+		"Database Host",
+		"Database User",
+		"Database Password",
+		"Database Name",
+		"Backup File Path",
 	}
+	placeholders := []string{
+		"localhost",
+		"postgres",
+		"password",
+		"mydatabase_restored",
+		"/path/to/backup.sql",
+	}
+
+	for i := range inputs {
+		inputs[i] = textinput.New()
+		inputs[i].Prompt = prompts[i] + ": "
+		inputs[i].Placeholder = placeholders[i]
+		inputs[i].CharLimit = 256
+		inputs[i].Width = 50
+		inputs[i].PromptStyle = pinkTextPrompt
+		inputs[i].TextStyle = whiteText
+		if i == 2 { // Password
+			inputs[i].EchoMode = textinput.EchoPassword
+			inputs[i].EchoCharacter = '•'
+		}
+	}
+	inputs[0].Focus()
+	return inputs
 }
 
 // Init kicks off the event loop.
@@ -97,8 +154,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	}
 
-	// Handle backup messages
+	// Global messages
 	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		if msg.Type == tea.KeyCtrlC || msg.Type == tea.KeyEsc {
+			m.quitting = true
+			return m, tea.Quit
+		}
+	// Backup messages
 	case PgDumpStartedMsg:
 		m.backupInProgress = true
 		m.backupMessage = "Backup started..."
@@ -113,35 +176,89 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.backupMessage = "Backup completed successfully!"
 		}
-		m.quitting = true  // Set quitting to true to show final summary
-		return m, tea.Quit // Quit after showing the final message
+		m.quitting = true
+		return m, tea.Quit
 	case PgDumpProgressMsg:
 		m.backupMessage = string(msg)
 		return m, nil
-	}
-
-	if m.backupInProgress || m.backupFinished {
-		// If backup is running or finished, only allow quitting
-		if msg, ok := msg.(tea.KeyMsg); ok {
-			switch msg.Type {
-			case tea.KeyCtrlC, tea.KeyEsc:
-				m.quitting = true
-				return m, tea.Quit
-			}
+	// Restore messages
+	case PgRestoreStartedMsg:
+		m.restoreInProgress = true
+		m.restoreMessage = "Restore started..."
+		return m, nil
+	case PgRestoreFinishedMsg:
+		m.restoreInProgress = false
+		m.restoreFinished = true
+		m.restoreError = msg.Err
+		if msg.Err != nil {
+			m.restoreMessage = fmt.Sprintf("Restore failed: %v", msg.Err)
+		} else {
+			m.restoreMessage = "Restore completed successfully!"
 		}
+		m.quitting = true
+		return m, tea.Quit
+	case PgRestoreProgressMsg:
+		m.restoreMessage = string(msg)
 		return m, nil
 	}
 
+	if m.backupInProgress || m.restoreInProgress {
+		return m, nil
+	}
+
+	switch m.currentView {
+	case mainMenu:
+		return m.updateMainMenu(msg)
+	case restoreChoiceMenu:
+		return m.updateRestoreChoiceMenu(msg)
+	case backupForm, restoreForm:
+		return m.updateForm(msg)
+	}
+
+	return m, nil
+}
+
+func (m Model) updateMainMenu(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.Type {
+		case tea.KeyUp, tea.KeyDown:
+			m.mainMenuChoice = 1 - m.mainMenuChoice // Toggle
+		case tea.KeyEnter:
+			if m.mainMenuChoice == 0 { // Backup
+				m.currentView = backupForm
+				m.inputs = setupBackupInputs()
+			} else { // Restore
+				m.currentView = restoreChoiceMenu
+			}
+		}
+	}
+	return m, nil
+}
+
+func (m Model) updateRestoreChoiceMenu(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.Type {
+		case tea.KeyUp, tea.KeyDown:
+			m.restoreMenuChoice = 1 - m.restoreMenuChoice // Toggle
+		case tea.KeyEnter:
+			m.restoreNewDB = m.restoreMenuChoice == 1 // 1 is "Create new database"
+			m.currentView = restoreForm
+			m.inputs = setupRestoreInputs()
+		case tea.KeyEsc: // Go back to main menu
+			m.currentView = mainMenu
+		}
+	}
+	return m, nil
+}
+
+func (m Model) updateForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 	currentInput := &m.inputs[m.step]
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.Type {
-		case tea.KeyCtrlC, tea.KeyEsc:
-			m.quitting = true
-			return m, tea.Quit
-
-		// Change focus between input and buttons
 		case tea.KeyUp, tea.KeyDown:
 			m.focusOnInput = !m.focusOnInput
 			if m.focusOnInput {
@@ -150,33 +267,39 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				currentInput.Blur()
 			}
 			return m, nil
-
-		// Cycle through buttons
 		case tea.KeyLeft, tea.KeyRight, tea.KeyTab, tea.KeyShiftTab:
 			if !m.focusOnInput {
-				m.focusedButton = 1 - m.focusedButton // Toggle between 0 and 1
+				m.focusedButton = 1 - m.focusedButton // Toggle
 			}
 			return m, nil
-
 		case tea.KeyEnter:
 			if m.focusOnInput {
 				if m.step == len(m.inputs)-1 {
 					m.submitted = true
-					return m, RunPgDumpCmd(m)
+					if m.currentView == backupForm {
+						return m, RunPgDumpCmd(m)
+					}
+					return m, RunPgRestoreCmd(m)
 				}
 				m.nextStep()
 			} else {
-				// A button is focused
-				if m.focusedButton == 0 { // Back button
-					m.prevStep()
-				} else { // Next/Submit button
+				if m.focusedButton == 0 { // Back
+					if m.step == 0 {
+						m.currentView = mainMenu
+						m.step = 0 // Reset form state
+					} else {
+						m.prevStep()
+					}
+				} else { // Next/Submit
 					if m.step == len(m.inputs)-1 {
 						m.submitted = true
-						return m, RunPgDumpCmd(m)
+						if m.currentView == backupForm {
+							return m, RunPgDumpCmd(m)
+						}
+						return m, RunPgRestoreCmd(m)
 					}
 					m.nextStep()
 				}
-				// Return focus to the input after a button press
 				m.focusOnInput = true
 				m.inputs[m.step].Focus()
 			}
@@ -184,7 +307,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// Handle character input and blinking
 	var cmd tea.Cmd
 	if m.focusOnInput {
 		*currentInput, cmd = currentInput.Update(msg)
@@ -195,63 +317,155 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // View renders the UI.
 func (m Model) View() string {
 	if m.quitting {
-		if m.submitted {
-			var b strings.Builder
-			if m.backupError != nil {
-				b.WriteString(summaryStyle.Render("Backup Failed!"))
-				b.WriteString("\n\n")
-				b.WriteString(cancelledStyle.Render(m.backupMessage))
-			} else {
-				b.WriteString(summaryStyle.Render("Backup Successful!"))
-				b.WriteString("\n\n")
-				b.WriteString(greenTextPrompt.Render(m.backupMessage))
-				if m.outputPath != "" {
-					b.WriteString(fmt.Sprintf("\nBackup file: %s", greenTextValue.Render(m.outputPath)))
-				}
-			}
-			b.WriteString("\n\nPress any key to exit.")
-			return b.String()
-		}
-		return cancelledStyle.Render("Backup wizard cancelled.") + "\n"
+		return m.viewSummary()
 	}
 
 	if m.backupInProgress {
-		var b strings.Builder
-		b.WriteString(welcomeStyle.Render("Welcome to the PostgreSQL Backup Wizard!"))
-		b.WriteString("\n\n")
-		b.WriteString(lipgloss.JoinVertical(lipgloss.Left,
-			"Backup in progress...",
-			greyText.Render(m.backupMessage),
-		))
-		b.WriteString("\n\n")
-		b.WriteString(helpStyle.Render("ctrl+c: cancel"))
-		return b.String()
+		return m.viewProgress("Backup in progress...", m.backupMessage)
+	}
+	if m.restoreInProgress {
+		return m.viewProgress("Restore in progress...", m.restoreMessage)
 	}
 
 	if m.submitted {
-		var b strings.Builder
-		b.WriteString(summaryStyle.Render("Backup configuration summary:"))
-		b.WriteString("\n\n")
-		for i := range m.inputs {
-			var value string
-			if i == 2 { // Password
-				value = strings.Repeat("•", len(m.inputs[i].Value()))
-			} else {
-				value = m.inputs[i].Value()
-			}
-			line := fmt.Sprintf("%s %s", greenTextPrompt.Render(m.inputs[i].Prompt), greenTextValue.Render(value))
-			b.WriteString(line)
-			b.WriteRune('\n')
-		}
-		b.WriteString("\n")
-		b.WriteString("Starting backup...")
-		return b.String()
+		return m.viewPreSubmit()
+	}
+
+	switch m.currentView {
+	case mainMenu:
+		return m.viewMainMenu()
+	case restoreChoiceMenu:
+		return m.viewRestoreChoiceMenu()
+	case backupForm, restoreForm:
+		return m.viewForm()
+	default:
+		return "Something went wrong."
+	}
+}
+
+func (m Model) viewSummary() string {
+	if !m.submitted {
+		return cancelledStyle.Render("Wizard cancelled.") + "\n"
 	}
 
 	var b strings.Builder
+	var err error
+	var msg, title string
 
-	// Title
-	b.WriteString(welcomeStyle.Render("Welcome to the PostgreSQL Backup Wizard!"))
+	if m.backupFinished {
+		err = m.backupError
+		msg = m.backupMessage
+		title = "Backup"
+	} else if m.restoreFinished {
+		err = m.restoreError
+		msg = m.restoreMessage
+		title = "Restore"
+	}
+
+	if err != nil {
+		b.WriteString(summaryStyle.Render(fmt.Sprintf("%s Failed!", title)))
+		b.WriteString("\n\n")
+		b.WriteString(cancelledStyle.Render(msg))
+	} else {
+		b.WriteString(summaryStyle.Render(fmt.Sprintf("%s Successful!", title)))
+		b.WriteString("\n\n")
+		b.WriteString(greenTextPrompt.Render(msg))
+		if m.outputPath != "" {
+			b.WriteString(fmt.Sprintf("\nBackup file: %s", greenTextValue.Render(m.outputPath)))
+		}
+	}
+	b.WriteString("\n\nPress any key to exit.")
+	return b.String()
+}
+
+func (m Model) viewProgress(title, message string) string {
+	var b strings.Builder
+	b.WriteString(welcomeStyle.Render("PostgreSQL Backup & Restore Wizard"))
+	b.WriteString("\n\n")
+	b.WriteString(lipgloss.JoinVertical(lipgloss.Left,
+		title,
+		greyText.Render(message),
+	))
+	b.WriteString("\n\n")
+	b.WriteString(helpStyle.Render("ctrl+c: cancel"))
+	return b.String()
+}
+
+func (m Model) viewPreSubmit() string {
+	var b strings.Builder
+	title := "Backup"
+	if m.currentView == restoreForm {
+		title = "Restore"
+	}
+	b.WriteString(summaryStyle.Render(fmt.Sprintf("%s configuration summary:", title)))
+	b.WriteString("\n\n")
+	for i := range m.inputs {
+		var value string
+		if i == 2 { // Password
+			value = strings.Repeat("•", len(m.inputs[i].Value()))
+		} else {
+			value = m.inputs[i].Value()
+		}
+		line := fmt.Sprintf("%s %s", greenTextPrompt.Render(m.inputs[i].Prompt), greenTextValue.Render(value))
+		b.WriteString(line)
+		b.WriteRune('\n')
+	}
+	b.WriteString("\n")
+	b.WriteString(fmt.Sprintf("Starting %s...", strings.ToLower(title)))
+	return b.String()
+}
+
+func (m Model) viewMainMenu() string {
+	var b strings.Builder
+	b.WriteString(welcomeStyle.Render("Welcome to the PostgreSQL Backup & Restore Wizard!"))
+	b.WriteString("\n\n")
+	b.WriteString("What would you like to do?\n\n")
+
+	backup := "[ ] Create a new backup"
+	restore := "[ ] Restore from a backup file"
+
+	if m.mainMenuChoice == 0 {
+		backup = focusedButton.Render("[x] Create a new backup")
+	} else {
+		restore = focusedButton.Render("[x] Restore from a backup file")
+	}
+
+	b.WriteString(lipgloss.JoinVertical(lipgloss.Left, backup, restore))
+	b.WriteString("\n\n")
+	b.WriteString(helpStyle.Render("up/down: select • enter: confirm • ctrl+c: quit"))
+	return b.String()
+}
+
+func (m Model) viewRestoreChoiceMenu() string {
+	var b strings.Builder
+	b.WriteString(welcomeStyle.Render("Restore Database"))
+	b.WriteString("\n\n")
+	b.WriteString("Choose a restore option:\n\n")
+
+	existing := "[ ] Restore to an existing database"
+	newDB := "[ ] Create a new database and restore into it"
+
+	if m.restoreMenuChoice == 0 {
+		existing = focusedButton.Render("[x] Restore to an existing database")
+	} else {
+		newDB = focusedButton.Render("[x] Create a new database and restore into it")
+	}
+
+	b.WriteString(lipgloss.JoinVertical(lipgloss.Left, existing, newDB))
+	b.WriteString("\n\n")
+	b.WriteString(helpStyle.Render("up/down: select • enter: confirm • esc: back • ctrl+c: quit"))
+	return b.String()
+}
+
+func (m Model) viewForm() string {
+	var b strings.Builder
+
+	title := "Backup"
+	if m.currentView == restoreForm {
+		title = "Restore"
+	}
+
+	b.WriteString(welcomeStyle.Render(fmt.Sprintf("PostgreSQL %s Wizard", title)))
 	b.WriteString("\n\n")
 
 	// Step Indicator
@@ -299,12 +513,7 @@ func (m Model) View() string {
 		}
 	}
 
-	if m.step > 0 {
-		backButton = backStyle.Render("[ Back ]")
-	} else {
-		// Keep alignment
-		backButton = strings.Repeat(" ", 8)
-	}
+	backButton = backStyle.Render("[ Back ]")
 
 	if m.step == len(m.inputs)-1 {
 		nextButton = nextStyle.Render("[ Submit ]")
