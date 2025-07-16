@@ -19,17 +19,17 @@ var (
 	whiteText       = lipgloss.NewStyle().Foreground(white)
 	welcomeStyle    = lipgloss.NewStyle().Foreground(pink).Bold(true).Italic(true)
 	summaryStyle    = lipgloss.NewStyle().Foreground(green).Bold(true).Italic(true)
-	errorStyle      = lipgloss.NewStyle().Foreground(red).Bold(true).Italic(true)
+	errorStyle      = lipgloss.NewStyle().Foreground(red)
 	cancelledStyle  = lipgloss.NewStyle().Foreground(amber).Bold(true).Italic(true)
 
 	// Button styles
 	focusedButton = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("231")).
-			Background(pink).
+			Foreground(pink).
+			Bold(true).
+			Italic(true).
 			Padding(0, 1)
 	blurredButton = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("231")).
-			Background(lipgloss.Color("237")).
 			Padding(0, 1)
 
 	// Help style

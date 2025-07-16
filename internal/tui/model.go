@@ -363,9 +363,8 @@ func (m Model) viewSummary() string {
 	}
 
 	if err != nil {
-		b.WriteString(summaryStyle.Render(fmt.Sprintf("%s Failed!", title)))
 		b.WriteString("\n\n")
-		b.WriteString(cancelledStyle.Render(msg))
+		b.WriteString(errorStyle.Render(msg))
 	} else {
 		b.WriteString(summaryStyle.Render(fmt.Sprintf("%s Successful!", title)))
 		b.WriteString("\n\n")
